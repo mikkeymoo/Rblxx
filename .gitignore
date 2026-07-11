@@ -1,0 +1,10 @@
+# Rojo / Wally build artifacts. Commit manifests and source, not downloads
+# or generated output.
+minigames/Packages/
+minigames/DevPackages/
+minigames/sourcemap.json
+*.rbxl
+
+# Editor/OS cruft
+.DS_Store
+*.swp
