@@ -1,9 +1,11 @@
 # Minigames
 
 A Roblox party-game experience built with Rojo. Players drop into a shared lobby,
-then get cycled through a random rotation of elimination-style minigames each round.
-Everything — the lobby, each arena, the UI, and the round loop — is built procedurally
-at runtime, so there's no manual Studio authoring required to run the place.
+then get cycled through a random rotation of six minigames each round — from
+last-one-standing elimination arenas to a checkpoint race, a memory/precision
+challenge, and a role-switching chase game. Everything — the lobby, each arena, the
+UI, and the round loop — is built procedurally at runtime, so there's no manual
+Studio authoring required to run the place.
 
 ## How a round works
 
@@ -42,6 +44,26 @@ A scattered platform tower that players climb. After a short delay, lava rises
 steadily from the base and eliminates anyone it touches. The highest surviving
 player(s) win — if the round timer runs out first, whoever climbed highest wins.
 
+### Parkour Race
+A zig-zagging obstacle course, including platforms that tween back and forth over
+gaps. Touching a platform sets it as your checkpoint, so falling respawns you there
+instead of eliminating you — the challenge is speed and timing, not survival. First
+to touch the finish line wins outright; if the timer runs out first, whoever reached
+the furthest checkpoint wins (ties share it).
+
+### Simon Says
+Four colored pads flash a sequence that gets one step longer every round. After the
+playback, everyone has to step on the pads in the same order — a wrong pad or running
+out of time eliminates you. Last player standing after enough rounds wins; if the
+timer runs out, everyone still in wins together.
+
+### Infection Tag
+One random player starts infected and gets a speed boost; touching a survivor
+infects them too, so the infected side spreads by chain reaction across an arena of
+pillars and cover. Survivors win if anyone is still clean when the timer runs out —
+but if the infection reaches every player first, the round ends immediately and the
+infected side wins instead.
+
 ## Project structure
 
 ```
@@ -61,7 +83,10 @@ minigames/
     │       └── Minigames/
     │           ├── Spleef.lua
     │           ├── ColorRush.lua
-    │           └── LavaRise.lua
+    │           ├── LavaRise.lua
+    │           ├── ParkourRace.lua
+    │           ├── SimonSays.lua
+    │           └── InfectionTag.lua
     └── StarterPlayerScripts/
         ├── Main.client.lua        # Wires server state to the client UI
         └── Modules/

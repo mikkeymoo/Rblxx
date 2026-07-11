@@ -23,6 +23,9 @@ local GAMES: { { Name: string, Module: MinigameModule } } = {
 	{ Name = "Spleef", Module = require(Minigames:WaitForChild("Spleef")) :: MinigameModule },
 	{ Name = "Color Rush", Module = require(Minigames:WaitForChild("ColorRush")) :: MinigameModule },
 	{ Name = "Lava Rise", Module = require(Minigames:WaitForChild("LavaRise")) :: MinigameModule },
+	{ Name = "Parkour Race", Module = require(Minigames:WaitForChild("ParkourRace")) :: MinigameModule },
+	{ Name = "Simon Says", Module = require(Minigames:WaitForChild("SimonSays")) :: MinigameModule },
+	{ Name = "Infection Tag", Module = require(Minigames:WaitForChild("InfectionTag")) :: MinigameModule },
 }
 
 local GameManager = {}
