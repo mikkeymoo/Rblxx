@@ -1,0 +1,1501 @@
+<roblox version="4">
+  <Item class="ReplicatedStorage" referent="0">
+    <Properties>
+      <string name="Name">ReplicatedStorage</string>
+    </Properties>
+    <Item class="ModuleScript" referent="1">
+      <Properties>
+        <string name="Name">Config</string>
+        <string name="Source"><![CDATA[--!strict
+-- Shared tunable values for the round loop, lobby, minigames, and client presentation.
+
+export type Config = {
+	IntermissionTime: number,
+	RoundTime: number,
+	ResultsTime: number,
+	MinPlayers: number,
+
+	LobbyRadius: number,
+	SpawnPadCount: number,
+
+	CoinsPerWin: number,
+	CoinsParticipation: number,
+
+	Spleef: {
+		Center: Vector3,
+		ArenaRadius: number,
+		TileSize: number,
+		TileHeight: number,
+		TileGap: number,
+		FallDelay: number,
+	},
+
+	ColorRush: {
+		Center: Vector3,
+		GridSize: number,
+		PadSize: number,
+		InitialCountdown: number,
+		MinCountdown: number,
+		CountdownDecrement: number,
+		FallDelay: number,
+	},
+
+	LavaRise: {
+		Center: Vector3,
+		TowerHeight: number,
+		TowerRadius: number,
+		PlatformSpacing: number,
+		LavaStartHeight: number,
+		LavaRiseSpeed: number,
+		LavaRiseStartDelay: number,
+	},
+
+	Sounds: { [string]: string },
+}
+
+local Config: Config = {
+	IntermissionTime = 15,
+	RoundTime = 60,
+	ResultsTime = 5,
+	MinPlayers = 1,
+
+	LobbyRadius = 40,
+	SpawnPadCount = 8,
+
+	CoinsPerWin = 50,
+	CoinsParticipation = 5,
+
+	Spleef = {
+		Center = Vector3.new(300, 50, 0),
+		ArenaRadius = 40,
+		TileSize = 6,
+		TileHeight = 1,
+		TileGap = 0.5,
+		FallDelay = 0.75,
+	},
+
+	ColorRush = {
+		Center = Vector3.new(0, 50, 300),
+		GridSize = 6,
+		PadSize = 8,
+		InitialCountdown = 5,
+		MinCountdown = 2,
+		CountdownDecrement = 0.5,
+		FallDelay = 1.25,
+	},
+
+	LavaRise = {
+		Center = Vector3.new(-300, 5, 0),
+		TowerHeight = 120,
+		TowerRadius = 24,
+		PlatformSpacing = 10,
+		LavaStartHeight = 0,
+		LavaRiseSpeed = 1.4,
+		LavaRiseStartDelay = 8,
+	},
+
+	-- rbxasset:// paths ship inside the Roblox client itself, no asset download required.
+	Sounds = {
+		RoundStart = "rbxasset://sounds/bell.wav",
+		RoundEnd = "rbxasset://sounds/bell.wav",
+		Countdown = "rbxasset://sounds/electronicpingshort.wav",
+		Victory = "rbxasset://sounds/bell.wav",
+		Eliminate = "rbxasset://sounds/impact_water.mp3",
+	},
+}
+
+return Config
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="2">
+      <Properties>
+        <string name="Name">Net</string>
+        <string name="Source"><![CDATA[--!strict
+-- Creates/locates the RemoteEvents used to drive client presentation. The server calls
+-- CreateRemotes() once at startup; both server and client call GetRemote() to fetch one.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Net = {}
+
+local REMOTE_NAMES = { "StateChanged", "Tick" }
+
+local function getRemotesFolder(): Folder
+	local existing = ReplicatedStorage:FindFirstChild("Remotes")
+	if existing then
+		return existing :: Folder
+	end
+	local folder = Instance.new("Folder")
+	folder.Name = "Remotes"
+	folder.Parent = ReplicatedStorage
+	return folder
+end
+
+function Net.CreateRemotes(): Folder
+	local folder = getRemotesFolder()
+	for _, name in REMOTE_NAMES do
+		if not folder:FindFirstChild(name) then
+			local remote = Instance.new("RemoteEvent")
+			remote.Name = name
+			remote.Parent = folder
+		end
+	end
+	return folder
+end
+
+function Net.GetRemote(name: string): RemoteEvent
+	local folder = getRemotesFolder()
+	local remote = folder:WaitForChild(name, 10)
+	assert(remote ~= nil, `Remote "{name}" was not found in ReplicatedStorage.Remotes`)
+	return remote :: RemoteEvent
+end
+
+return Net
+]]></string>
+      </Properties>
+    </Item>
+  </Item>
+  <Item class="ServerScriptService" referent="3">
+    <Properties>
+      <string name="Name">ServerScriptService</string>
+    </Properties>
+    <Item class="Script" referent="4">
+      <Properties>
+        <string name="Name">Main</string>
+        <token name="RunContext">0</token>
+        <string name="Source"><![CDATA[--!strict
+-- Entry point: sets up leaderstats for players and starts the round loop.
+local ServerScriptService = game:GetService("ServerScriptService")
+local Players = game:GetService("Players")
+
+local Modules = ServerScriptService:WaitForChild("Modules")
+local GameManager = require(Modules:WaitForChild("GameManager"))
+local PlayerData = require(Modules:WaitForChild("PlayerData"))
+
+Players.PlayerAdded:Connect(function(player)
+	PlayerData.Init(player)
+end)
+
+for _, player in Players:GetPlayers() do
+	PlayerData.Init(player)
+end
+
+GameManager.Run()
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="Folder" referent="5">
+      <Properties>
+        <string name="Name">Modules</string>
+      </Properties>
+      <Item class="ModuleScript" referent="6">
+        <Properties>
+          <string name="Name">GameManager</string>
+          <string name="Source"><![CDATA[--!strict
+-- Server-authoritative round loop: Intermission -> random minigame -> Round -> Results -> repeat.
+-- Requires Config.MinPlayers (default 1) so a solo player still cycles through for testing.
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage:WaitForChild("Config"))
+local Net = require(ReplicatedStorage:WaitForChild("Net"))
+local LobbyBuilder = require(script.Parent:WaitForChild("LobbyBuilder"))
+local PlayerData = require(script.Parent:WaitForChild("PlayerData"))
+local MinigameUtils = require(script.Parent:WaitForChild("MinigameUtils"))
+
+local Minigames = script.Parent:WaitForChild("Minigames")
+
+export type MinigameModule = {
+	Init: ({ Player }) -> (),
+	Start: () -> (),
+	Cleanup: () -> (),
+	GetWinners: (boolean?) -> { Player },
+}
+
+local GAMES: { { Name: string, Module: MinigameModule } } = {
+	{ Name = "Spleef", Module = require(Minigames:WaitForChild("Spleef")) :: MinigameModule },
+	{ Name = "Color Rush", Module = require(Minigames:WaitForChild("ColorRush")) :: MinigameModule },
+	{ Name = "Lava Rise", Module = require(Minigames:WaitForChild("LavaRise")) :: MinigameModule },
+}
+
+local GameManager = {}
+
+local function waitForPlayers(stateChanged: RemoteEvent)
+	while #Players:GetPlayers() < Config.MinPlayers do
+		stateChanged:FireAllClients("WaitingForPlayers", {})
+		task.wait(2)
+	end
+end
+
+local function countdown(seconds: number, tick: RemoteEvent)
+	for i = seconds, 1, -1 do
+		tick:FireAllClients(i)
+		task.wait(1)
+	end
+end
+
+local function teleportToLobby(players: { Player })
+	for _, player in players do
+		local character = player.Character
+		if character then
+			local humanoid = character:FindFirstChildOfClass("Humanoid")
+			if humanoid then
+				humanoid.WalkSpeed = 16
+				humanoid.JumpPower = 50
+				humanoid.JumpHeight = 7.2
+			end
+		end
+	end
+	MinigameUtils.TeleportPlayersInCircle(players, Vector3.new(0, 0, 0), Config.LobbyRadius * 0.6, 5)
+end
+
+function GameManager.Run()
+	LobbyBuilder.Build()
+	Net.CreateRemotes()
+
+	local stateChanged = Net.GetRemote("StateChanged")
+	local tick = Net.GetRemote("Tick")
+
+	while true do
+		waitForPlayers(stateChanged)
+
+		local pick = GAMES[math.random(1, #GAMES)]
+
+		stateChanged:FireAllClients("Intermission", { GameName = pick.Name })
+		countdown(Config.IntermissionTime, tick)
+
+		local participants = Players:GetPlayers()
+		if #participants < Config.MinPlayers then
+			continue
+		end
+
+		pick.Module.Init(participants)
+		stateChanged:FireAllClients("Round", { GameName = pick.Name })
+		pick.Module.Start()
+
+		local winners: { Player } = {}
+		for i = Config.RoundTime, 1, -1 do
+			tick:FireAllClients(i)
+			task.wait(1)
+			local roundWinners = pick.Module.GetWinners(false)
+			if roundWinners and #roundWinners > 0 then
+				winners = roundWinners
+				break
+			end
+		end
+		if #winners == 0 then
+			winners = pick.Module.GetWinners(true)
+		end
+
+		pick.Module.Cleanup()
+
+		local winnerNames: { string } = {}
+		for _, player in winners do
+			if player.Parent then
+				PlayerData.AddCoins(player, Config.CoinsPerWin)
+				table.insert(winnerNames, player.Name)
+			end
+		end
+		for _, player in participants do
+			if player.Parent and not table.find(winners, player) then
+				PlayerData.AddCoins(player, Config.CoinsParticipation)
+			end
+		end
+
+		stateChanged:FireAllClients("Results", { GameName = pick.Name, WinnerNames = winnerNames })
+		countdown(Config.ResultsTime, tick)
+
+		teleportToLobby(participants)
+	end
+end
+
+return GameManager
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="7">
+        <Properties>
+          <string name="Name">LobbyBuilder</string>
+          <string name="Source"><![CDATA[--!strict
+-- Builds the lobby (baseplate + spawn pads) procedurally at server startup. No Studio
+-- authoring is required; everything here is created with Instance.new at runtime.
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage:WaitForChild("Config"))
+
+local LobbyBuilder = {}
+
+local LOBBY_NAME = "Lobby"
+
+function LobbyBuilder.Build(): Model
+	local existing = Workspace:FindFirstChild(LOBBY_NAME)
+	if existing then
+		existing:Destroy()
+	end
+
+	local lobby = Instance.new("Model")
+	lobby.Name = LOBBY_NAME
+
+	local baseplate = Instance.new("Part")
+	baseplate.Name = "Baseplate"
+	baseplate.Size = Vector3.new(Config.LobbyRadius * 2, 4, Config.LobbyRadius * 2)
+	baseplate.Position = Vector3.new(0, -2, 0)
+	baseplate.Anchored = true
+	baseplate.Material = Enum.Material.Grass
+	baseplate.Color = Color3.fromRGB(74, 128, 71)
+	baseplate.Parent = lobby
+
+	local spawnFolder = Instance.new("Folder")
+	spawnFolder.Name = "SpawnPads"
+	spawnFolder.Parent = lobby
+
+	local padRadius = Config.LobbyRadius * 0.6
+	for i = 1, Config.SpawnPadCount do
+		local angle = (i / Config.SpawnPadCount) * math.pi * 2
+		local x = math.cos(angle) * padRadius
+		local z = math.sin(angle) * padRadius
+
+		local pad = Instance.new("Part")
+		pad.Name = "SpawnPad" .. i
+		pad.Shape = Enum.PartType.Cylinder
+		pad.Size = Vector3.new(1, 6, 6)
+		pad.CFrame = CFrame.new(x, 0.5, z) * CFrame.Angles(0, 0, math.rad(90))
+		pad.Anchored = true
+		pad.Material = Enum.Material.Neon
+		pad.Color = Color3.fromRGB(85, 170, 255)
+		pad.Parent = spawnFolder
+
+		local spawnLocation = Instance.new("SpawnLocation")
+		spawnLocation.Name = "Spawn" .. i
+		spawnLocation.Size = Vector3.new(5, 1, 5)
+		spawnLocation.CFrame = CFrame.new(x, 1.5, z)
+		spawnLocation.Anchored = true
+		spawnLocation.CanCollide = false
+		spawnLocation.Transparency = 1
+		spawnLocation.Neutral = true
+		spawnLocation.Duration = 0
+		spawnLocation.Parent = spawnFolder
+	end
+
+	lobby.Parent = Workspace
+	return lobby
+end
+
+return LobbyBuilder
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="8">
+        <Properties>
+          <string name="Name">MinigameUtils</string>
+          <string name="Source"><![CDATA[--!strict
+-- Shared helpers used by multiple minigame modules: fall-based elimination and
+-- spreading players around a circle. Kept here instead of duplicated per-game.
+local RunService = game:GetService("RunService")
+
+local MinigameUtils = {}
+
+export type EliminationCallback = (player: Player) -> ()
+
+-- Connects a Heartbeat watcher that eliminates any player in `alive` whose
+-- HumanoidRootPart drops below the threshold returned by `getThresholdY`.
+-- Mutates `alive` (removes eliminated players) and invokes `onEliminate`.
+function MinigameUtils.WatchForFalls(
+	getThresholdY: () -> number,
+	alive: { [Player]: boolean },
+	onEliminate: EliminationCallback
+): RBXScriptConnection
+	return RunService.Heartbeat:Connect(function()
+		local thresholdY = getThresholdY()
+		for player in pairs(alive) do
+			local character = player.Character
+			local root = character and character:FindFirstChild("HumanoidRootPart")
+			if root and (root :: BasePart).Position.Y < thresholdY then
+				alive[player] = nil
+				onEliminate(player)
+			elseif not character or not root then
+				alive[player] = nil
+				onEliminate(player)
+			end
+		end
+	end)
+end
+
+function MinigameUtils.TeleportPlayersInCircle(players: { Player }, center: Vector3, radius: number, yOffset: number?)
+	local y = yOffset or 5
+	local count = math.max(#players, 1)
+	for i, player in players do
+		local angle = (i / count) * math.pi * 2
+		local x = center.X + math.cos(angle) * radius
+		local z = center.Z + math.sin(angle) * radius
+		local character = player.Character or player.CharacterAdded:Wait()
+		character:PivotTo(CFrame.new(x, center.Y + y, z))
+	end
+end
+
+function MinigameUtils.SendToSpectate(player: Player, spectatePoint: CFrame)
+	local character = player.Character
+	if not character then
+		return
+	end
+	character:PivotTo(spectatePoint)
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.WalkSpeed = 0
+		humanoid.JumpPower = 0
+		humanoid.JumpHeight = 0
+	end
+end
+
+return MinigameUtils
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="Folder" referent="9">
+        <Properties>
+          <string name="Name">Minigames</string>
+        </Properties>
+        <Item class="ModuleScript" referent="10">
+          <Properties>
+            <string name="Name">ColorRush</string>
+            <string name="Source"><![CDATA[--!strict
+-- Color Rush: a floor of colored pads. A safe color is announced, then every other
+-- pad falls after a shrinking countdown. Repeats until one color (and its players)
+-- remains, or the round timer forces an end.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+
+local Config = require(ReplicatedStorage:WaitForChild("Config"))
+local MinigameUtils = require(script.Parent.Parent:WaitForChild("MinigameUtils"))
+
+local ColorRush = {}
+
+local PALETTE = {
+	Color3.fromRGB(220, 60, 60),
+	Color3.fromRGB(60, 140, 220),
+	Color3.fromRGB(60, 200, 100),
+	Color3.fromRGB(230, 200, 60),
+}
+
+local COLOR_NAMES: { [string]: string } = {
+	["220,60,60"] = "Red",
+	["60,140,220"] = "Blue",
+	["60,200,100"] = "Green",
+	["230,200,60"] = "Yellow",
+}
+
+local function colorKey(color: Color3): string
+	return `{math.floor(color.R * 255)},{math.floor(color.G * 255)},{math.floor(color.B * 255)}`
+end
+
+local arenaFolder: Folder? = nil
+local signLabel: TextLabel? = nil
+local alive: { [Player]: boolean } = {}
+local fallConnection: RBXScriptConnection? = nil
+local pads: { BasePart } = {}
+local running = false
+local sequenceDone = false
+local winners: { Player } = {}
+
+local function announce(text: string)
+	if signLabel then
+		signLabel.Text = text
+	end
+end
+
+local function buildArena(): Folder
+	local folder = Instance.new("Folder")
+	folder.Name = "ColorRushArena"
+
+	local center = Config.ColorRush.Center
+	local gridSize = Config.ColorRush.GridSize
+	local padSize = Config.ColorRush.PadSize
+	local half = (gridSize * padSize) / 2
+
+	pads = {}
+	for xi = 0, gridSize - 1 do
+		for zi = 0, gridSize - 1 do
+			local color = PALETTE[math.random(1, #PALETTE)]
+			local pad = Instance.new("Part")
+			pad.Name = "Pad"
+			pad.Size = Vector3.new(padSize - 0.4, 1, padSize - 0.4)
+			pad.Position = Vector3.new(
+				center.X - half + xi * padSize + padSize / 2,
+				center.Y,
+				center.Z - half + zi * padSize + padSize / 2
+			)
+			pad.Anchored = true
+			pad.Material = Enum.Material.SmoothPlastic
+			pad.Color = color
+			pad.Parent = folder
+			table.insert(pads, pad)
+		end
+	end
+
+	local sign = Instance.new("Part")
+	sign.Name = "AnnouncementSign"
+	sign.Anchored = true
+	sign.CanCollide = false
+	sign.Transparency = 1
+	sign.Size = Vector3.new(1, 1, 1)
+	sign.Position = center + Vector3.new(0, 20, 0)
+	sign.Parent = folder
+
+	local billboard = Instance.new("BillboardGui")
+	billboard.Size = UDim2.fromOffset(400, 100)
+	billboard.AlwaysOnTop = true
+	billboard.Parent = sign
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.TextScaled = true
+	label.Font = Enum.Font.GothamBold
+	label.TextColor3 = Color3.new(1, 1, 1)
+	label.TextStrokeTransparency = 0
+	label.Text = "Color Rush!"
+	label.Parent = billboard
+
+	signLabel = label
+
+	folder.Parent = Workspace
+	return folder
+end
+
+local function fallPad(pad: BasePart)
+	pad.CanCollide = false
+	local tween = TweenService:Create(pad, TweenInfo.new(0.5, Enum.EasingStyle.Quad), { Transparency = 1 })
+	tween:Play()
+	task.delay(0.5, function()
+		if pad.Parent then
+			pad:Destroy()
+		end
+	end)
+end
+
+local function countAlive(): number
+	local n = 0
+	for _ in pairs(alive) do
+		n += 1
+	end
+	return n
+end
+
+local function remainingAlive(): { Player }
+	local remaining: { Player } = {}
+	for player in pairs(alive) do
+		table.insert(remaining, player)
+	end
+	return remaining
+end
+
+local function runSequence()
+	local countdownTime = Config.ColorRush.InitialCountdown
+	while running and countAlive() > 1 and #pads > 0 do
+		local presentColors: { Color3 } = {}
+		local seen: { [string]: boolean } = {}
+		for _, pad in pads do
+			if pad.Parent then
+				local key = colorKey(pad.Color)
+				if not seen[key] then
+					seen[key] = true
+					table.insert(presentColors, pad.Color)
+				end
+			end
+		end
+		if #presentColors <= 1 then
+			break
+		end
+
+		local safeColor = presentColors[math.random(1, #presentColors)]
+		announce(`Safe color: {COLOR_NAMES[colorKey(safeColor)] or "?"}`)
+
+		task.wait(countdownTime)
+		if not running then
+			return
+		end
+
+		local remainingPads: { BasePart } = {}
+		for _, pad in pads do
+			if pad.Parent then
+				if colorKey(pad.Color) ~= colorKey(safeColor) then
+					fallPad(pad)
+				else
+					table.insert(remainingPads, pad)
+				end
+			end
+		end
+		pads = remainingPads
+
+		announce("Go!")
+		task.wait(Config.ColorRush.FallDelay)
+
+		countdownTime = math.max(Config.ColorRush.MinCountdown, countdownTime - Config.ColorRush.CountdownDecrement)
+	end
+
+	sequenceDone = true
+	winners = remainingAlive()
+end
+
+function ColorRush.Init(players: { Player })
+	alive = {}
+	for _, player in players do
+		alive[player] = true
+	end
+	winners = {}
+	sequenceDone = false
+	arenaFolder = buildArena()
+	MinigameUtils.TeleportPlayersInCircle(
+		players,
+		Config.ColorRush.Center,
+		Config.ColorRush.GridSize * Config.ColorRush.PadSize * 0.25,
+		4
+	)
+end
+
+function ColorRush.Start()
+	running = true
+	fallConnection = MinigameUtils.WatchForFalls(function()
+		return Config.ColorRush.Center.Y - 15
+	end, alive, function(player)
+		MinigameUtils.SendToSpectate(player, CFrame.new(Config.ColorRush.Center + Vector3.new(0, 50, 0)))
+	end)
+	task.spawn(runSequence)
+end
+
+function ColorRush.Cleanup()
+	running = false
+	if fallConnection then
+		fallConnection:Disconnect()
+		fallConnection = nil
+	end
+	if arenaFolder then
+		arenaFolder:Destroy()
+		arenaFolder = nil
+	end
+	pads = {}
+	alive = {}
+	signLabel = nil
+end
+
+function ColorRush.GetWinners(final: boolean?): { Player }
+	if sequenceDone then
+		return winners
+	end
+	if countAlive() <= 1 or final then
+		return remainingAlive()
+	end
+	return {}
+end
+
+return ColorRush
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="11">
+          <Properties>
+            <string name="Name">LavaRise</string>
+            <string name="Source"><![CDATA[--!strict
+-- Lava Rise: a climbable tower of scattered platforms. Lava rises steadily after a
+-- short delay; players who touch it are eliminated. Highest survivor(s) win, whether
+-- that's decided by last-one-standing or by height when the round timer forces an end.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+
+local Config = require(ReplicatedStorage:WaitForChild("Config"))
+local MinigameUtils = require(script.Parent.Parent:WaitForChild("MinigameUtils"))
+
+local LavaRise = {}
+
+local arenaFolder: Folder? = nil
+local lavaPart: Part? = nil
+local alive: { [Player]: boolean } = {}
+local maxHeight: { [Player]: number } = {}
+local heartbeatConnection: RBXScriptConnection? = nil
+local roundStartClock: number? = nil
+
+local function buildTower(): Folder
+	local folder = Instance.new("Folder")
+	folder.Name = "LavaRiseTower"
+
+	local center = Config.LavaRise.Center
+	local towerRadius = Config.LavaRise.TowerRadius
+	local spacing = Config.LavaRise.PlatformSpacing
+	local platformCount = math.floor(Config.LavaRise.TowerHeight / spacing)
+
+	for level = 0, platformCount do
+		local y = center.Y + level * spacing
+		local angleOffset = level * 0.7
+		local ringPlatforms = 4
+		for i = 1, ringPlatforms do
+			local angle = angleOffset + (i / ringPlatforms) * math.pi * 2
+			local radius = towerRadius * (0.5 + 0.5 * ((level % 3) / 3))
+			local x = center.X + math.cos(angle) * radius
+			local z = center.Z + math.sin(angle) * radius
+
+			local platform = Instance.new("Part")
+			platform.Name = "Platform"
+			platform.Size = Vector3.new(8, 1, 8)
+			platform.Position = Vector3.new(x, y, z)
+			platform.Anchored = true
+			platform.Material = Enum.Material.Rock
+			platform.Color = Color3.fromRGB(120, 100, 90)
+			platform.Parent = folder
+		end
+	end
+
+	local base = Instance.new("Part")
+	base.Name = "Base"
+	base.Size = Vector3.new(towerRadius * 2.4, 2, towerRadius * 2.4)
+	base.Position = Vector3.new(center.X, center.Y - 1, center.Z)
+	base.Anchored = true
+	base.Material = Enum.Material.Rock
+	base.Color = Color3.fromRGB(90, 80, 75)
+	base.Parent = folder
+
+	local lava = Instance.new("Part")
+	lava.Name = "Lava"
+	lava.Size = Vector3.new(towerRadius * 2.4, 2, towerRadius * 2.4)
+	lava.Position = Vector3.new(center.X, center.Y + Config.LavaRise.LavaStartHeight, center.Z)
+	lava.Anchored = true
+	lava.CanCollide = false
+	lava.Material = Enum.Material.Neon
+	lava.Color = Color3.fromRGB(255, 80, 20)
+	lava.Parent = folder
+	lavaPart = lava
+
+	lava.Touched:Connect(function(hit: BasePart)
+		local character = hit.Parent
+		local player = character and Players:GetPlayerFromCharacter(character)
+		if player and alive[player] then
+			alive[player] = nil
+			MinigameUtils.SendToSpectate(player, CFrame.new(center + Vector3.new(0, Config.LavaRise.TowerHeight + 30, 0)))
+		end
+	end)
+
+	folder.Parent = Workspace
+	return folder
+end
+
+local function countAlive(): number
+	local n = 0
+	for _ in pairs(alive) do
+		n += 1
+	end
+	return n
+end
+
+function LavaRise.Init(players: { Player })
+	alive = {}
+	maxHeight = {}
+	for _, player in players do
+		alive[player] = true
+		maxHeight[player] = 0
+	end
+	roundStartClock = nil
+	arenaFolder = buildTower()
+	MinigameUtils.TeleportPlayersInCircle(players, Config.LavaRise.Center, Config.LavaRise.TowerRadius * 0.4, 4)
+end
+
+function LavaRise.Start()
+	roundStartClock = os.clock()
+	heartbeatConnection = RunService.Heartbeat:Connect(function()
+		local lava = lavaPart
+		local startClock = roundStartClock
+		if not lava or not startClock then
+			return
+		end
+		local elapsed = os.clock() - startClock
+		if elapsed >= Config.LavaRise.LavaRiseStartDelay then
+			local risenTime = elapsed - Config.LavaRise.LavaRiseStartDelay
+			local newY = Config.LavaRise.Center.Y + Config.LavaRise.LavaStartHeight + risenTime * Config.LavaRise.LavaRiseSpeed
+			lava.Position = Vector3.new(lava.Position.X, newY, lava.Position.Z)
+		end
+
+		for player in pairs(alive) do
+			local character = player.Character
+			local root = character and character:FindFirstChild("HumanoidRootPart")
+			if root then
+				local height = (root :: BasePart).Position.Y - Config.LavaRise.Center.Y
+				if height > (maxHeight[player] or 0) then
+					maxHeight[player] = height
+				end
+			end
+		end
+	end)
+end
+
+function LavaRise.Cleanup()
+	if heartbeatConnection then
+		heartbeatConnection:Disconnect()
+		heartbeatConnection = nil
+	end
+	if arenaFolder then
+		arenaFolder:Destroy()
+		arenaFolder = nil
+	end
+	lavaPart = nil
+	alive = {}
+	maxHeight = {}
+	roundStartClock = nil
+end
+
+function LavaRise.GetWinners(final: boolean?): { Player }
+	local aliveCount = countAlive()
+	if aliveCount <= 1 then
+		local remaining: { Player } = {}
+		for player in pairs(alive) do
+			table.insert(remaining, player)
+		end
+		if #remaining > 0 then
+			return remaining
+		end
+		if final then
+			local bestPlayer: Player? = nil
+			local bestHeight = -math.huge
+			for player, height in pairs(maxHeight) do
+				if height > bestHeight then
+					bestHeight = height
+					bestPlayer = player
+				end
+			end
+			if bestPlayer then
+				return { bestPlayer }
+			end
+		end
+		return {}
+	end
+
+	if final then
+		local bestHeight = -math.huge
+		for player in pairs(alive) do
+			local height = maxHeight[player] or 0
+			if height > bestHeight then
+				bestHeight = height
+			end
+		end
+		local topPlayers: { Player } = {}
+		for player in pairs(alive) do
+			if (maxHeight[player] or 0) >= bestHeight - 0.01 then
+				table.insert(topPlayers, player)
+			end
+		end
+		return topPlayers
+	end
+
+	return {}
+end
+
+return LavaRise
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="12">
+          <Properties>
+            <string name="Name">Spleef</string>
+            <string name="Source"><![CDATA[--!strict
+-- Spleef: a floating tile arena. Tiles vanish shortly after a player touches them.
+-- Last player standing (or whoever's left when the round timer forces an end) wins.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+local Players = game:GetService("Players")
+
+local Config = require(ReplicatedStorage:WaitForChild("Config"))
+local MinigameUtils = require(script.Parent.Parent:WaitForChild("MinigameUtils"))
+
+local Spleef = {}
+
+local arenaFolder: Folder? = nil
+local alive: { [Player]: boolean } = {}
+local fallConnection: RBXScriptConnection? = nil
+
+local function vanishTile(tile: BasePart)
+	if tile:GetAttribute("Vanishing") then
+		return
+	end
+	tile:SetAttribute("Vanishing", true)
+	task.delay(Config.Spleef.FallDelay, function()
+		if not tile.Parent then
+			return
+		end
+		tile.CanCollide = false
+		local tween = TweenService:Create(tile, TweenInfo.new(0.4, Enum.EasingStyle.Quad), { Transparency = 1 })
+		tween:Play()
+		tween.Completed:Wait()
+		if tile.Parent then
+			tile:Destroy()
+		end
+	end)
+end
+
+local function buildArena(): Folder
+	local folder = Instance.new("Folder")
+	folder.Name = "SpleefArena"
+
+	local center = Config.Spleef.Center
+	local radius = Config.Spleef.ArenaRadius
+	local tileSize = Config.Spleef.TileSize
+	local step = tileSize + Config.Spleef.TileGap
+	local count = math.floor((radius * 2) / step)
+
+	for xi = 0, count do
+		for zi = 0, count do
+			local x = center.X - radius + xi * step
+			local z = center.Z - radius + zi * step
+			if (Vector3.new(x, 0, z) - Vector3.new(center.X, 0, center.Z)).Magnitude <= radius then
+				local tile = Instance.new("Part")
+				tile.Name = "Tile"
+				tile.Size = Vector3.new(tileSize, Config.Spleef.TileHeight, tileSize)
+				tile.Position = Vector3.new(x, center.Y, z)
+				tile.Anchored = true
+				tile.Material = Enum.Material.Ice
+				tile.Color = Color3.fromRGB(150, 210, 255)
+				tile.Parent = folder
+
+				tile.Touched:Connect(function(hit: BasePart)
+					local character = hit.Parent
+					local player = character and Players:GetPlayerFromCharacter(character)
+					if player then
+						vanishTile(tile)
+					end
+				end)
+			end
+		end
+	end
+
+	folder.Parent = Workspace
+	return folder
+end
+
+function Spleef.Init(players: { Player })
+	alive = {}
+	for _, player in players do
+		alive[player] = true
+	end
+	arenaFolder = buildArena()
+	MinigameUtils.TeleportPlayersInCircle(players, Config.Spleef.Center, Config.Spleef.ArenaRadius * 0.4, Config.Spleef.TileHeight + 4)
+end
+
+function Spleef.Start()
+	fallConnection = MinigameUtils.WatchForFalls(function()
+		return Config.Spleef.Center.Y - 15
+	end, alive, function(player)
+		MinigameUtils.SendToSpectate(player, CFrame.new(Config.Spleef.Center + Vector3.new(0, 50, 0)))
+	end)
+end
+
+function Spleef.Cleanup()
+	if fallConnection then
+		fallConnection:Disconnect()
+		fallConnection = nil
+	end
+	if arenaFolder then
+		arenaFolder:Destroy()
+		arenaFolder = nil
+	end
+	alive = {}
+end
+
+function Spleef.GetWinners(final: boolean?): { Player }
+	local remaining: { Player } = {}
+	for player in pairs(alive) do
+		table.insert(remaining, player)
+	end
+	if #remaining <= 1 or final then
+		return remaining
+	end
+	return {}
+end
+
+return Spleef
+]]></string>
+          </Properties>
+        </Item>
+      </Item>
+      <Item class="ModuleScript" referent="13">
+        <Properties>
+          <string name="Name">PlayerData</string>
+          <string name="Source"><![CDATA[--!strict
+-- leaderstats coin tracking backed by DataStoreService, with a pcall'd load/save
+-- and an in-memory session cache so writes don't hit the DataStore every award.
+local Players = game:GetService("Players")
+local DataStoreService = game:GetService("DataStoreService")
+
+local CoinStore = DataStoreService:GetDataStore("MinigamesCoins_v1")
+
+local PlayerData = {}
+
+local sessionCache: { [number]: number } = {}
+
+local function loadCoins(player: Player): number
+	local success, result = pcall(function()
+		return CoinStore:GetAsync("Player_" .. player.UserId)
+	end)
+	if success and type(result) == "number" then
+		return result
+	end
+	return 0
+end
+
+local function saveCoins(player: Player, coins: number)
+	local success, err = pcall(function()
+		CoinStore:SetAsync("Player_" .. player.UserId, coins)
+	end)
+	if not success then
+		warn(`[PlayerData] Failed to save coins for {player.Name}: {tostring(err)}`)
+	end
+end
+
+function PlayerData.Init(player: Player)
+	local leaderstats = Instance.new("Folder")
+	leaderstats.Name = "leaderstats"
+	leaderstats.Parent = player
+
+	local coins = Instance.new("IntValue")
+	coins.Name = "Coins"
+	coins.Value = loadCoins(player)
+	coins.Parent = leaderstats
+
+	sessionCache[player.UserId] = coins.Value
+end
+
+function PlayerData.AddCoins(player: Player, amount: number)
+	local leaderstats = player:FindFirstChild("leaderstats")
+	if not leaderstats then
+		return
+	end
+	local coins = leaderstats:FindFirstChild("Coins")
+	if not coins then
+		return
+	end
+	local intValue = coins :: IntValue
+	intValue.Value += amount
+	sessionCache[player.UserId] = intValue.Value
+end
+
+function PlayerData.Save(player: Player)
+	local cached = sessionCache[player.UserId]
+	if cached ~= nil then
+		saveCoins(player, cached)
+	end
+	sessionCache[player.UserId] = nil
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	PlayerData.Save(player)
+end)
+
+game:BindToClose(function()
+	for _, player in Players:GetPlayers() do
+		PlayerData.Save(player)
+	end
+end)
+
+return PlayerData
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="StarterPlayer" referent="14">
+    <Properties>
+      <string name="Name">StarterPlayer</string>
+    </Properties>
+    <Item class="StarterPlayerScripts" referent="15">
+      <Properties>
+        <string name="Name">StarterPlayerScripts</string>
+      </Properties>
+      <Item class="LocalScript" referent="16">
+        <Properties>
+          <string name="Name">Main</string>
+          <string name="Source"><![CDATA[--!strict
+-- Client entry point: wires server state broadcasts to the HUD, intermission, and
+-- winner screens, and keeps the coin count in sync with the leaderstats value.
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Net = require(ReplicatedStorage:WaitForChild("Net"))
+
+local Modules = script.Parent:WaitForChild("Modules")
+local HUD = require(Modules:WaitForChild("HUD"))
+local IntermissionScreen = require(Modules:WaitForChild("IntermissionScreen"))
+local WinnerScreen = require(Modules:WaitForChild("WinnerScreen"))
+local SoundPlayer = require(Modules:WaitForChild("SoundPlayer"))
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui") :: PlayerGui
+
+local hud = HUD.new(playerGui)
+local intermission = IntermissionScreen.new(playerGui)
+local winnerScreen = WinnerScreen.new(playerGui)
+
+local stateChanged = Net.GetRemote("StateChanged")
+local tick = Net.GetRemote("Tick")
+
+local currentState = "Intermission"
+local currentGameName = ""
+
+stateChanged.OnClientEvent:Connect(function(state: string, data: { [string]: any })
+	currentState = state
+
+	if state == "WaitingForPlayers" then
+		intermission:Show("Waiting for players...")
+		winnerScreen:Hide()
+		hud:SetVisible(false)
+	elseif state == "Intermission" then
+		currentGameName = data.GameName or ""
+		intermission:Show(`Next up: {currentGameName}`)
+		winnerScreen:Hide()
+		hud:SetVisible(false)
+		SoundPlayer.Play("Countdown")
+	elseif state == "Round" then
+		currentGameName = data.GameName or ""
+		intermission:Hide()
+		winnerScreen:Hide()
+		hud:SetVisible(true)
+		hud:SetGameName(currentGameName)
+		SoundPlayer.Play("RoundStart")
+	elseif state == "Results" then
+		hud:SetVisible(false)
+		intermission:Hide()
+		winnerScreen:Show(currentGameName, data.WinnerNames or {})
+		SoundPlayer.Play("Victory")
+	end
+end)
+
+tick.OnClientEvent:Connect(function(timeLeft: number)
+	if currentState == "Round" then
+		hud:SetTime(timeLeft)
+	elseif currentState == "Intermission" or currentState == "WaitingForPlayers" then
+		intermission:SetCountdown(timeLeft)
+	end
+end)
+
+local function watchCoins()
+	local leaderstats = player:WaitForChild("leaderstats")
+	local coins = leaderstats:WaitForChild("Coins") :: IntValue
+	hud:SetCoins(coins.Value)
+	coins:GetPropertyChangedSignal("Value"):Connect(function()
+		hud:SetCoins(coins.Value)
+	end)
+end
+
+task.spawn(watchCoins)
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="Folder" referent="17">
+        <Properties>
+          <string name="Name">Modules</string>
+        </Properties>
+        <Item class="ModuleScript" referent="18">
+          <Properties>
+            <string name="Name">HUD</string>
+            <string name="Source"><![CDATA[--!strict
+-- In-round HUD: round timer, current game name, coin count. Built entirely in code.
+local HUD = {}
+HUD.__index = HUD
+
+export type HUD = typeof(setmetatable(
+	{} :: {
+		gui: ScreenGui,
+		gameLabel: TextLabel,
+		timeLabel: TextLabel,
+		coinLabel: TextLabel,
+	},
+	HUD
+))
+
+function HUD.new(playerGui: PlayerGui): HUD
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "HUD"
+	gui.ResetOnSpawn = false
+	gui.Enabled = false
+	gui.Parent = playerGui
+
+	local container = Instance.new("Frame")
+	container.Name = "Container"
+	container.Size = UDim2.fromOffset(280, 90)
+	container.Position = UDim2.new(0.5, -140, 0, 10)
+	container.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+	container.BackgroundTransparency = 0.25
+	container.BorderSizePixel = 0
+	container.Parent = gui
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 12)
+	corner.Parent = container
+
+	local gameLabel = Instance.new("TextLabel")
+	gameLabel.Name = "GameLabel"
+	gameLabel.Size = UDim2.new(1, 0, 0, 28)
+	gameLabel.Position = UDim2.new(0, 0, 0, 4)
+	gameLabel.BackgroundTransparency = 1
+	gameLabel.Font = Enum.Font.GothamBold
+	gameLabel.TextSize = 20
+	gameLabel.TextColor3 = Color3.new(1, 1, 1)
+	gameLabel.Text = ""
+	gameLabel.Parent = container
+
+	local timeLabel = Instance.new("TextLabel")
+	timeLabel.Name = "TimeLabel"
+	timeLabel.Size = UDim2.new(1, 0, 0, 36)
+	timeLabel.Position = UDim2.new(0, 0, 0, 32)
+	timeLabel.BackgroundTransparency = 1
+	timeLabel.Font = Enum.Font.GothamBold
+	timeLabel.TextSize = 30
+	timeLabel.TextColor3 = Color3.fromRGB(255, 220, 100)
+	timeLabel.Text = "0"
+	timeLabel.Parent = container
+
+	local coinLabel = Instance.new("TextLabel")
+	coinLabel.Name = "CoinLabel"
+	coinLabel.Size = UDim2.new(1, 0, 0, 22)
+	coinLabel.Position = UDim2.new(0, 0, 0, 68)
+	coinLabel.BackgroundTransparency = 1
+	coinLabel.Font = Enum.Font.Gotham
+	coinLabel.TextSize = 16
+	coinLabel.TextColor3 = Color3.fromRGB(255, 240, 180)
+	coinLabel.Text = "Coins: 0"
+	coinLabel.Parent = container
+
+	return setmetatable({
+		gui = gui,
+		gameLabel = gameLabel,
+		timeLabel = timeLabel,
+		coinLabel = coinLabel,
+	}, HUD)
+end
+
+function HUD.SetVisible(self: HUD, visible: boolean)
+	self.gui.Enabled = visible
+end
+
+function HUD.SetGameName(self: HUD, name: string)
+	self.gameLabel.Text = name
+end
+
+function HUD.SetTime(self: HUD, seconds: number)
+	self.timeLabel.Text = tostring(seconds)
+end
+
+function HUD.SetCoins(self: HUD, coins: number)
+	self.coinLabel.Text = `Coins: {coins}`
+end
+
+return HUD
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="19">
+          <Properties>
+            <string name="Name">IntermissionScreen</string>
+            <string name="Source"><![CDATA[--!strict
+-- Intermission screen: announces the next minigame and counts down to its start.
+local IntermissionScreen = {}
+IntermissionScreen.__index = IntermissionScreen
+
+export type IntermissionScreen = typeof(setmetatable(
+	{} :: {
+		gui: ScreenGui,
+		titleLabel: TextLabel,
+		countdownLabel: TextLabel,
+	},
+	IntermissionScreen
+))
+
+function IntermissionScreen.new(playerGui: PlayerGui): IntermissionScreen
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "IntermissionScreen"
+	gui.ResetOnSpawn = false
+	gui.Enabled = false
+	gui.Parent = playerGui
+
+	local container = Instance.new("Frame")
+	container.Size = UDim2.fromOffset(500, 140)
+	container.Position = UDim2.new(0.5, -250, 0.5, -70)
+	container.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+	container.BackgroundTransparency = 0.2
+	container.BorderSizePixel = 0
+	container.Parent = gui
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 16)
+	corner.Parent = container
+
+	local titleLabel = Instance.new("TextLabel")
+	titleLabel.Size = UDim2.new(1, -20, 0, 60)
+	titleLabel.Position = UDim2.new(0, 10, 0, 15)
+	titleLabel.BackgroundTransparency = 1
+	titleLabel.Font = Enum.Font.GothamBold
+	titleLabel.TextSize = 32
+	titleLabel.TextColor3 = Color3.new(1, 1, 1)
+	titleLabel.TextWrapped = true
+	titleLabel.Text = ""
+	titleLabel.Parent = container
+
+	local countdownLabel = Instance.new("TextLabel")
+	countdownLabel.Size = UDim2.new(1, -20, 0, 40)
+	countdownLabel.Position = UDim2.new(0, 10, 0, 80)
+	countdownLabel.BackgroundTransparency = 1
+	countdownLabel.Font = Enum.Font.Gotham
+	countdownLabel.TextSize = 22
+	countdownLabel.TextColor3 = Color3.fromRGB(200, 200, 210)
+	countdownLabel.Text = ""
+	countdownLabel.Parent = container
+
+	return setmetatable({
+		gui = gui,
+		titleLabel = titleLabel,
+		countdownLabel = countdownLabel,
+	}, IntermissionScreen)
+end
+
+function IntermissionScreen.Show(self: IntermissionScreen, text: string)
+	self.titleLabel.Text = text
+	self.countdownLabel.Text = ""
+	self.gui.Enabled = true
+end
+
+function IntermissionScreen.Hide(self: IntermissionScreen)
+	self.gui.Enabled = false
+end
+
+function IntermissionScreen.SetCountdown(self: IntermissionScreen, seconds: number)
+	self.countdownLabel.Text = `Starting in {seconds}...`
+end
+
+return IntermissionScreen
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="20">
+          <Properties>
+            <string name="Name">SoundPlayer</string>
+            <string name="Source"><![CDATA[--!strict
+-- Plays one-shot sounds from Config.Sounds (built-in rbxasset:// paths only) and
+-- cleans the Sound instance up afterward.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SoundService = game:GetService("SoundService")
+
+local Config = require(ReplicatedStorage:WaitForChild("Config"))
+
+local SoundPlayer = {}
+
+function SoundPlayer.Play(name: string)
+	local soundId = Config.Sounds[name]
+	if not soundId then
+		return
+	end
+	local sound = Instance.new("Sound")
+	sound.SoundId = soundId
+	sound.Volume = 0.5
+	sound.Parent = SoundService
+	sound.Ended:Connect(function()
+		sound:Destroy()
+	end)
+	sound:Play()
+	task.delay(10, function()
+		if sound.Parent then
+			sound:Destroy()
+		end
+	end)
+end
+
+return SoundPlayer
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="21">
+          <Properties>
+            <string name="Name">WinnerScreen</string>
+            <string name="Source"><![CDATA[--!strict
+-- Winner celebration screen: shown during Results, lists the round's winning player names.
+local WinnerScreen = {}
+WinnerScreen.__index = WinnerScreen
+
+export type WinnerScreen = typeof(setmetatable(
+	{} :: {
+		gui: ScreenGui,
+		titleLabel: TextLabel,
+		namesLabel: TextLabel,
+	},
+	WinnerScreen
+))
+
+function WinnerScreen.new(playerGui: PlayerGui): WinnerScreen
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "WinnerScreen"
+	gui.ResetOnSpawn = false
+	gui.Enabled = false
+	gui.Parent = playerGui
+
+	local container = Instance.new("Frame")
+	container.Size = UDim2.fromOffset(500, 180)
+	container.Position = UDim2.new(0.5, -250, 0.5, -90)
+	container.BackgroundColor3 = Color3.fromRGB(25, 20, 10)
+	container.BackgroundTransparency = 0.15
+	container.BorderSizePixel = 0
+	container.Parent = gui
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 16)
+	corner.Parent = container
+
+	local titleLabel = Instance.new("TextLabel")
+	titleLabel.Size = UDim2.new(1, -20, 0, 50)
+	titleLabel.Position = UDim2.new(0, 10, 0, 15)
+	titleLabel.BackgroundTransparency = 1
+	titleLabel.Font = Enum.Font.GothamBold
+	titleLabel.TextSize = 28
+	titleLabel.TextColor3 = Color3.fromRGB(255, 215, 100)
+	titleLabel.Text = ""
+	titleLabel.Parent = container
+
+	local namesLabel = Instance.new("TextLabel")
+	namesLabel.Size = UDim2.new(1, -20, 0, 90)
+	namesLabel.Position = UDim2.new(0, 10, 0, 70)
+	namesLabel.BackgroundTransparency = 1
+	namesLabel.Font = Enum.Font.Gotham
+	namesLabel.TextSize = 22
+	namesLabel.TextWrapped = true
+	namesLabel.TextColor3 = Color3.new(1, 1, 1)
+	namesLabel.Text = ""
+	namesLabel.Parent = container
+
+	return setmetatable({
+		gui = gui,
+		titleLabel = titleLabel,
+		namesLabel = namesLabel,
+	}, WinnerScreen)
+end
+
+function WinnerScreen.Show(self: WinnerScreen, gameName: string, winnerNames: { string })
+	self.titleLabel.Text = `{gameName} - Results`
+	if #winnerNames == 0 then
+		self.namesLabel.Text = "No winners this round!"
+	elseif #winnerNames == 1 then
+		self.namesLabel.Text = `Winner: {winnerNames[1]}`
+	else
+		self.namesLabel.Text = `Winners: {table.concat(winnerNames, ", ")}`
+	end
+	self.gui.Enabled = true
+end
+
+function WinnerScreen.Hide(self: WinnerScreen)
+	self.gui.Enabled = false
+end
+
+return WinnerScreen
+]]></string>
+          </Properties>
+        </Item>
+      </Item>
+    </Item>
+  </Item>
+</roblox>
